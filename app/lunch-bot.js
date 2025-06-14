@@ -4,6 +4,7 @@ import schedule from 'node-schedule';
 import dotenv from 'dotenv';
 import { Poll } from './poll.js';
 import { getRestaurants } from './restaurants.js';
+import { query } from './database.js';
 
 dotenv.config();
 
@@ -43,6 +44,17 @@ async function pickOrderers() {
 
 async function postPoll() {
     const restaurants = await getRestaurants();
+    console.log('=== 레스토랑 데이터 디버그 ===');
+    console.log('Raw restaurants data:', restaurants);
+    restaurants.forEach((r, idx) => {
+        console.log(`Restaurant ${idx}:`, {
+            id: r.id,
+            name: r.name,
+            nameLength: r.name.length,
+            nameBytes: Buffer.from(r.name, 'utf8').length,
+            nameEncoded: Buffer.from(r.name, 'utf8').toString('utf8')
+        });
+    });
     const options = restaurants.map((r) => r.name);
     await Poll.start(options);
 
@@ -58,6 +70,8 @@ async function postPoll() {
     ];
 
     options.forEach((option, idx) => {
+        // Ensure proper UTF-8 encoding for button text
+        const buttonText = Buffer.from(option, 'utf8').toString('utf8');
         blocks.push({
             type: 'actions',
             elements: [
@@ -65,7 +79,8 @@ async function postPoll() {
                     type: 'button',
                     text: {
                         type: 'plain_text',
-                        text: option
+                        text: buttonText,
+                        emoji: true
                     },
                     action_id: `vote_${idx}`
                 }
@@ -91,13 +106,39 @@ async function endPoll() {
     if (!(await Poll.isActive())) return;
     const result = await Poll.end();
 
-    // Determine winning option
-    const sorted = Object.entries(result.tally).sort((a, b) => b[1] - a[1]);
-    const [winner, winnerVotes] = sorted[0];
+    const { sortedResults, totalVoters } = result;
 
-    let text = `*🍱 금요일 점심 투표 결과*\n우승: *${winner}* (${winnerVotes}표)\n\n전체 득표수:`;
-    for (const [opt, cnt] of sorted) {
-        text += `\n• ${opt}: ${cnt}`;
+    if (sortedResults.length === 0 || totalVoters === 0) {
+        await app.client.chat.postMessage({
+            channel: POLL_CHANNEL,
+            text: '🍱 금요일 점심 투표 결과\n아무도 투표하지 않았습니다. 😢'
+        });
+        return;
+    }
+
+    const winner = sortedResults[0];
+    let text = `*🍱 금요일 점심 투표 결과*\n\n🏆 **우승: ${winner.option}** (${winner.count}표, ${winner.percentage}%)\n\n📊 **전체 결과** (총 ${totalVoters}명 참여):`;
+
+    sortedResults.forEach((result, index) => {
+        const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : '  ';
+        text += `\n${medal} ${result.rank}위. ${result.option}: ${result.count}표 (${result.percentage}%)`;
+    });
+
+    // Log detailed voting data for admin purposes (console only)
+    console.log('=== 투표 상세 로그 ===');
+    console.log('투표자별 선택:', result.votes);
+    console.log('최종 집계:', result.tally);
+
+    try {
+        // Update winner's order count in database
+        const restaurants = await getRestaurants();
+        const winnerRestaurant = restaurants.find(r => r.name === winner.option);
+        if (winnerRestaurant) {
+            await query('UPDATE restaurants SET orders = orders + 1 WHERE id = ?', [winnerRestaurant.id]);
+            console.log(`Updated order count for ${winner.option}`);
+        }
+    } catch (err) {
+        console.error('Failed to update order count:', err);
     }
 
     await app.client.chat.postMessage({
@@ -136,25 +177,59 @@ function registerSlashCommands() {
     app.command('/lunch', async ({ command, ack, respond }) => {
         await ack();
         const text = command.text.trim();
-        if (text === 'start') {
+        const [action, ...args] = text.split(' ');
+
+        if (action === 'start') {
             if (await Poll.isActive()) {
                 await respond('이미 진행 중인 투표가 있습니다.');
             } else {
                 await postPoll();
                 await respond('점심 투표를 시작했습니다!');
             }
-        } else if (text === 'end') {
+        } else if (action === 'end') {
             if (!(await Poll.isActive())) {
                 await respond('진행 중인 투표가 없습니다.');
             } else {
                 await endPoll();
                 await respond('투표를 마감했습니다.');
             }
-        } else if (text === 'status') {
-            const active = await Poll.isActive();
-            await respond(active ? '투표가 진행 중입니다.' : '현재 진행 중인 투표가 없습니다.');
+        } else if (action === 'status') {
+            try {
+                const status = await Poll.getCurrentStatus();
+                if (!status) {
+                    await respond('현재 진행 중인 투표가 없습니다.');
+                } else {
+                    const startTime = new Date(status.startedAt).toLocaleTimeString('ko-KR');
+                    const optionsList = status.options.map(opt => `• ${opt}`).join('\n');
+                    await respond(`📊 **투표 진행 중**\n시작 시간: ${startTime}\n참여자 수: ${status.totalVoters}명\n\n**투표 옵션:**\n${optionsList}\n\n💡 투표 결과는 마감 후 공개됩니다.`);
+                }
+            } catch (err) {
+                console.error('Failed to get poll status:', err);
+                await respond('❌ 투표 상태 조회 중 오류가 발생했습니다.');
+            }
+        } else if (action === 'add') {
+            const restaurantName = args.join(' ').trim();
+            if (!restaurantName) {
+                await respond('사용법: /lunch add [음식점명]');
+                return;
+            }
+            try {
+                await query('INSERT INTO restaurants (name) VALUES (?)', [restaurantName]);
+                await respond(`✅ "${restaurantName}" 음식점이 추가되었습니다!`);
+            } catch (err) {
+                console.error('Failed to add restaurant:', err);
+                await respond('❌ 음식점 추가 중 오류가 발생했습니다.');
+            }
+        } else if (action === 'list') {
+            try {
+                const restaurants = await getRestaurants();
+                const list = restaurants.map(r => `• ${r.name}`).join('\n');
+                await respond(`현재 등록된 음식점:\n${list}`);
+            } catch (err) {
+                await respond('❌ 음식점 목록 조회 중 오류가 발생했습니다.');
+            }
         } else {
-            await respond('사용법: /lunch [start|end|status]');
+            await respond('사용법: /lunch [start|end|status|add|list]\n• start: 투표 시작\n• end: 투표 마감\n• status: 투표 상태\n• add [음식점명]: 새 음식점 추가\n• list: 등록된 음식점 목록');
         }
     });
 }

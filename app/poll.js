@@ -37,16 +37,43 @@ export class Poll {
 
     static _tally(data) {
         const tally = {};
+        const voterCount = Object.keys(data.votes).length;
         for (const option of data.options) {
             tally[option] = 0;
         }
         for (const vote of Object.values(data.votes)) {
             if (tally.hasOwnProperty(vote)) tally[vote] += 1;
         }
+        
+        // Sort by vote count (descending)
+        const sortedResults = Object.entries(tally)
+            .sort((a, b) => b[1] - a[1])
+            .map(([option, count], index) => ({
+                option,
+                count,
+                rank: index + 1,
+                percentage: voterCount > 0 ? Math.round((count / voterCount) * 100) : 0
+            }));
+        
         return {
             options: data.options,
             votes: data.votes,
-            tally
+            tally,
+            sortedResults,
+            totalVoters: voterCount
+        };
+    }
+
+    static async getCurrentStatus() {
+        const data = await this._get();
+        if (!data) return null;
+        
+        return {
+            isActive: true,
+            startedAt: data.startedAt,
+            totalVoters: Object.keys(data.votes).length,
+            options: data.options
+            // Note: Not exposing real-time vote counts
         };
     }
 } 

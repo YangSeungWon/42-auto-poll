@@ -106,7 +106,7 @@ async function endPoll() {
     if (!(await Poll.isActive())) return;
     const result = await Poll.end();
 
-    const { sortedResults, totalVoters } = result;
+    const { sortedResults, totalVoters, finalWinner, tieBreakInfo, votes } = result;
 
     if (sortedResults.length === 0 || totalVoters === 0) {
         await app.client.chat.postMessage({
@@ -116,26 +116,56 @@ async function endPoll() {
         return;
     }
 
-    const winner = sortedResults[0];
-    let text = `*🍱 금요일 점심 투표 결과*\n\n🏆 **우승: ${winner.option}** (${winner.count}표, ${winner.percentage}%)\n\n📊 **전체 결과** (총 ${totalVoters}명 참여):`;
+    let text = `*🍱 금요일 점심 투표 결과*\n\n🏆 **우승: ${finalWinner.option}** (${finalWinner.count}표, ${finalWinner.percentage}%)`;
+
+    // Add tie-breaking explanation if applicable
+    if (tieBreakInfo) {
+        text += `\n\n🎲 **동점 처리**: ${tieBreakInfo.tiedOptions.join(', ')} 중에서 랜덤 선택으로 "${tieBreakInfo.selectedWinner}"이(가) 선정되었습니다.`;
+    }
+
+    text += `\n\n📊 **전체 결과** (총 ${totalVoters}명 참여):`;
 
     sortedResults.forEach((result, index) => {
         const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : '  ';
         text += `\n${medal} ${result.rank}위. ${result.option}: ${result.count}표 (${result.percentage}%)`;
     });
 
+    // Add voter breakdown
+    text += `\n\n👥 **투표자별 선택**:`;
+    const votersByOption = {};
+
+    // Group voters by their choice
+    for (const [userId, choice] of Object.entries(votes)) {
+        if (!votersByOption[choice]) {
+            votersByOption[choice] = [];
+        }
+        votersByOption[choice].push(userId);
+    }
+
+    // Display voters for each option (sorted by vote count)
+    sortedResults.forEach(result => {
+        const voters = votersByOption[result.option] || [];
+        if (voters.length > 0) {
+            const voterNames = voters.map(id => `<@${id}>`).join(', ');
+            text += `\n• **${result.option}** (${result.count}표): ${voterNames}`;
+        }
+    });
+
     // Log detailed voting data for admin purposes (console only)
     console.log('=== 투표 상세 로그 ===');
     console.log('투표자별 선택:', result.votes);
     console.log('최종 집계:', result.tally);
+    if (tieBreakInfo) {
+        console.log('동점 처리:', tieBreakInfo);
+    }
 
     try {
         // Update winner's order count in database
         const restaurants = await getRestaurants();
-        const winnerRestaurant = restaurants.find(r => r.name === winner.option);
+        const winnerRestaurant = restaurants.find(r => r.name === finalWinner.option);
         if (winnerRestaurant) {
             await query('UPDATE restaurants SET orders = orders + 1 WHERE id = ?', [winnerRestaurant.id]);
-            console.log(`Updated order count for ${winner.option}`);
+            console.log(`Updated order count for ${finalWinner.option}`);
         }
     } catch (err) {
         console.error('Failed to update order count:', err);
@@ -164,12 +194,32 @@ function registerVoteActions() {
         }
         const restaurants = await getRestaurants();
         const option = restaurants[optionIdx].name;
-        await Poll.vote(userId, option);
-        await app.client.chat.postEphemeral({
-            channel: POLL_CHANNEL,
-            user: userId,
-            text: `*${option}* 에 투표 완료!`
-        });
+
+        try {
+            const voteResult = await Poll.vote(userId, option);
+
+            let message;
+            if (voteResult.isVoteChange) {
+                message = `🔄 **투표 변경 완료!**\n이전 선택: ${voteResult.previousVote}\n새로운 선택: *${option}*\n\n💡 1인 1투표 원칙에 따라 이전 투표가 취소되고 새로운 투표로 변경되었습니다.`;
+            } else if (voteResult.previousVote) {
+                message = `✅ 이미 *${option}* 에 투표하셨습니다.\n\n💡 1인 1투표 원칙에 따라 중복 투표는 불가능합니다.`;
+            } else {
+                message = `✅ *${option}* 에 투표 완료!\n\n💡 1인 1투표 원칙에 따라 다른 옵션을 선택하면 이전 투표가 취소됩니다.`;
+            }
+
+            await app.client.chat.postEphemeral({
+                channel: POLL_CHANNEL,
+                user: userId,
+                text: message
+            });
+        } catch (err) {
+            console.error('Vote error:', err);
+            await app.client.chat.postEphemeral({
+                channel: POLL_CHANNEL,
+                user: userId,
+                text: '❌ 투표 중 오류가 발생했습니다.'
+            });
+        }
     });
 }
 

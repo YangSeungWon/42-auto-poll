@@ -19,8 +19,18 @@ export class Poll {
     static async vote(userId, option) {
         const data = await this._get();
         if (!data) throw new Error('No active poll');
+
+        const previousVote = data.votes[userId];
+        const isVoteChange = previousVote && previousVote !== option;
+
         data.votes[userId] = option;
         await redis.set(POLL_KEY, JSON.stringify(data));
+
+        return {
+            previousVote,
+            isVoteChange,
+            newVote: option
+        };
     }
 
     static async end() {
@@ -44,7 +54,7 @@ export class Poll {
         for (const vote of Object.values(data.votes)) {
             if (tally.hasOwnProperty(vote)) tally[vote] += 1;
         }
-        
+
         // Sort by vote count (descending)
         const sortedResults = Object.entries(tally)
             .sort((a, b) => b[1] - a[1])
@@ -54,20 +64,39 @@ export class Poll {
                 rank: index + 1,
                 percentage: voterCount > 0 ? Math.round((count / voterCount) * 100) : 0
             }));
-        
+
+        // Handle ties for first place
+        const topVoteCount = sortedResults[0]?.count || 0;
+        const winners = sortedResults.filter(r => r.count === topVoteCount);
+        let finalWinner = winners[0];
+        let tieBreakInfo = null;
+
+        if (winners.length > 1 && topVoteCount > 0) {
+            // Random tie-breaking
+            const randomIndex = Math.floor(Math.random() * winners.length);
+            finalWinner = winners[randomIndex];
+            tieBreakInfo = {
+                tiedOptions: winners.map(w => w.option),
+                selectedWinner: finalWinner.option,
+                method: 'random'
+            };
+        }
+
         return {
             options: data.options,
             votes: data.votes,
             tally,
             sortedResults,
-            totalVoters: voterCount
+            totalVoters: voterCount,
+            finalWinner,
+            tieBreakInfo
         };
     }
 
     static async getCurrentStatus() {
         const data = await this._get();
         if (!data) return null;
-        
+
         return {
             isActive: true,
             startedAt: data.startedAt,

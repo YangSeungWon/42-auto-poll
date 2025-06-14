@@ -1,0 +1,21 @@
+{
+    "name": "friday-lunch-bot",
+    "version": "1.0.0",
+    "description": "Slack bot that manages Friday lunch poll and random orderers",
+    "main": "lunch-bot.js",
+    "type": "module",
+    "scripts": {
+        "start": "node lunch-bot.js",
+        "dev": "nodemon lunch-bot.js"
+    },
+    "dependencies": {
+        "@slack/bolt": "^3.15.2",
+        "dotenv": "^16.3.1",
+        "mysql2": "^3.3.3",
+        "node-schedule": "^2.1.1",
+        "redis": "^4.6.7"
+    },
+    "devDependencies": {
+        "nodemon": "^3.0.1"
+    }
+}

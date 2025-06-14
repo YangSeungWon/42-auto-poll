@@ -1,0 +1,37 @@
+version: "3.8"
+services:
+  app:
+    build: ./app
+    env_file: ./app/.env
+    depends_on:
+      - db
+      - redis
+    # no external port exposure; internal service name used by nginx
+    restart: unless-stopped
+
+  db:
+    build: ./mysql
+    environment:
+      MYSQL_USER: ${MYSQL_USER:-lunchbot}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-securepwd}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-lunchbot_db}
+      TZ: ${TZ:-Asia/Seoul}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    restart: unless-stopped
+
+  redis:
+    image: redis:6-alpine
+    # internal only, no host port mapping
+    restart: unless-stopped
+
+  nginx:
+    build: ./nginx
+    ports:
+      - "14224:80"
+    depends_on:
+      - app
+    restart: unless-stopped
+
+volumes:
+  mysql-data:
